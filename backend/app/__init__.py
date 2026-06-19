@@ -1,1 +1,1 @@
-"""Trading agent backend package."""
+"""FastAPI app and backend services for BreezePilot."""

@@ -1,94 +1,107 @@
-# ICICI Breeze Trading Assistant
+# BreezePilot
 
-Paper-first, API-first scaffold for a personal intraday trading assistant. The browser extension is only a dashboard and control panel. Trading actions must be performed by the backend through broker adapters, and the default adapter is `PaperBrokerAdapter`.
+BreezePilot is being built in small parts. Part 1 is the Chrome extension dashboard. Part 2 is the FastAPI backend control center. Part 3 is the typed ICICI Breeze REST bridge. Part 4 adds the local first-run setup flow. Parts 5-9 add quote-driven paper trading, scanner, fixed strategies, stronger risk checks, and richer explanations. Phases 10-15 add gated backtesting, manual-confirm live order preparation, autonomous live-trading locks, challenger strategy records, champion promotion, audit logs, and static-IP VPS production notes.
 
-This project is for learning and paper trading first. It does not guarantee profits, does not bypass broker controls, does not automate OTPs, does not store broker or bank passwords, and does not click ICICI Direct buy/sell buttons in the browser.
+## Part 1: Chrome Extension
 
-## Current Scope
+- Autopilot ON/OFF control
+- Guided setup wizard for backend, local account, Breeze credentials, daily session, trading rules, and readiness
+- Budget, stop-loss, target, daily max loss, max trades, mode, and allowed stock settings
+- Backend URL configuration
+- P&L summary, open trades, trade history, and latest AI explanation views
+- Scanner shortlist, approved strategy list, and daily paper report view
+- Backtests, live orders, strategy lab, and safety/audit tabs
+- Emergency exit command with confirmation
+- Offline/stale backend handling
+- Chrome local storage only for safe preferences: backend URL, last tab, app bearer token, and draft settings
 
-- FastAPI backend with auth-token protected API routes.
-- PostgreSQL SQLAlchemy models for sessions, signals, orders, positions, reports, Hermes suggestions, and tests.
-- Paper broker simulation with limit-order-only behavior.
-- Deterministic risk engine with quantity based on stop-loss risk.
-- Strategy plugin interface plus VWAP, moving average, breakout, and paper-only RSI scaffolds.
-- Emergency stop and square-off endpoints.
-- EOD report generator.
-- Hermes analysis boundary that can suggest and test changes but cannot trade or override risk.
-- Withdrawal readiness and manual checklist module.
-- React + TypeScript + Tailwind Chrome extension dashboard scaffold.
-- Safe placeholder `BreezeBrokerAdapter` with live order calls intentionally blocked in v1.
+The extension does not scrape ICICI Direct, click website buttons, place orders, or store broker credentials.
 
-## Setup
+## Part 2: FastAPI Backend
+
+- Stores settings, runtime state, trade logs, risk events, and explanations in SQLite
+- Supports a local single-user account with bearer-token auth after registration
+- Stores Breeze credentials encrypted in backend runtime data, with env credentials still supported for local development
+- Accepts the daily manually generated Breeze session key through `POST /api/session`
+- Defaults to paper mode
+- Gates live mode behind credentials, active session, and static-IP readiness
+- Enforces deterministic risk checks before any execution path
+- Provides normalized Breeze broker inspection endpoints for quote, history, portfolio, orders, and trades
+- Runs scanner and paper trades from live Breeze quote/history data without placing real orders
+- Stores backtest runs and strategy eligibility gates before live trading
+- Keeps real order placement behind manual confirmation and live-mode/static-IP gates
+- Adds kill switch, audit trail, daily report handoff, health checks, and safety status endpoints
+
+See [backend/README.md](backend/README.md) for backend setup and run commands, and [backend/deployment.md](backend/deployment.md) for static-IP VPS notes.
+
+## Backend API Used By Extension
+
+- `GET /api/setup/status`
+- `POST /api/account/register`
+- `POST /api/account/login`
+- `POST /api/account/logout`
+- `PUT /api/credentials/breeze`
+- `GET /api/credentials/status`
+- `GET /api/dashboard`
+- `GET /api/settings`
+- `PUT /api/settings`
+- `POST /api/session`
+- `POST /api/autopilot/start`
+- `POST /api/autopilot/stop`
+- `POST /api/emergency-exit`
+- `POST /api/paper/run-once`
+- `POST /api/paper/monitor`
+- `POST /api/trades/{trade_id}/paper-exit`
+- `GET /api/scanner/latest`
+- `POST /api/scanner/run`
+- `GET /api/strategies`
+- `GET /api/reports/daily`
+- `POST /api/backtests/run`
+- `GET /api/backtests`
+- `GET /api/backtests/{run_id}`
+- `GET /api/strategies/{strategy}/eligibility`
+- `POST /api/live/orders/prepare`
+- `POST /api/live/orders/{order_id}/confirm`
+- `POST /api/live/orders/{order_id}/cancel`
+- `GET /api/live/orders`
+- `POST /api/live/orders/{order_id}/square-off`
+- `POST /api/live/autopilot/start`
+- `POST /api/live/autopilot/stop`
+- `GET /api/live/autopilot/status`
+- `POST /api/improvement/run-after-market`
+- `GET /api/improvement/runs`
+- `GET /api/strategy-versions`
+- `GET /api/strategy-versions/{version_id}`
+- `GET /api/champion`
+- `GET /api/challengers`
+- `POST /api/challengers/{version_id}/promote`
+- `POST /api/champion/rollback`
+- `GET /api/health`
+- `GET /api/audit`
+- `GET /api/safety/status`
+- `POST /api/safety/kill-switch`
+- `POST /api/reports/daily/send`
+- `GET /api/trades/open`
+- `GET /api/trades/history`
+- `GET /api/explanations/latest`
+
+The popup polls `/api/dashboard` every 5 seconds. No WebSockets are used in Part 1.
+
+## Extension Development
 
 ```bash
-cd trading-agent
-cp .env.example .env
-```
-
-Backend:
-
-```bash
-cd backend
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-uvicorn app.main:app --reload --port 8000
-```
-
-Infrastructure:
-
-```bash
-cd trading-agent
-docker compose up postgres redis
-```
-
-Extension:
-
-```bash
-cd extension
 npm install
 npm run dev
 ```
 
-For a packaged extension:
+## Build For Chrome
 
 ```bash
 npm run build
 ```
 
-Then load `extension/dist` as an unpacked extension in Chrome.
+Then open Chrome Extensions, enable Developer Mode, and load the generated `dist` folder as an unpacked extension.
 
-## API Defaults
+## Safety Boundary
 
-- Dashboard token: `DASHBOARD_API_TOKEN` from `.env`.
-- Default mode: paper.
-- Live trading flag: `LIVE_TRADING_ENABLED=false`.
-- Browser never receives Breeze credentials.
-
-## Tests
-
-```bash
-cd trading-agent/backend
-python3 -m pytest
-```
-
-The initial suite covers risk rejection, risk-based sizing, emergency stop, consecutive-loss stops, paper broker simulation, paper/live broker separation, square-off, redaction, and withdrawal non-automation.
-
-## Breeze Notes
-
-The scaffold documents the current Breeze constraints from official ICICI/Breeze docs: 100 API calls per minute, 5,000 per day, static IP requirement for order placement, 10 combined order actions per second, no market orders, and no Margin/Option Plus order placement/modification/cancellation through Breeze. Re-check official docs before enabling any live path.
-
-## Live Trading Status
-
-Live trading is not implemented as a default behavior. `BreezeBrokerAdapter.place_order()` returns a rejection until the live integration is deliberately implemented, tested, reviewed, and guarded by:
-
-- `LIVE_TRADING_ENABLED=true`
-- backend-only Breeze credentials
-- registered static IP
-- manual confirmation
-- deterministic risk approval
-- order-action rate limiting
-- audit logging
-- intraday square-off
-
-Read [docs/live-trading-checklist.md](docs/live-trading-checklist.md) before adding live calls.
+The extension must never store ICICI passwords, Breeze secret keys, session tokens, or API credentials. Those belong only in the backend.

@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "BreezePilot",
+  "description": "Dashboard and safety controls for the BreezePilot trading backend.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "BreezePilot",
+    "default_popup": "index.html"
+  },
+  "permissions": ["storage"],
+  "host_permissions": ["http://*/api/*", "https://*/api/*"]
+}

@@ -1,0 +1,7 @@
+[Unit]
+Description=Check BreezePilot API health
+After=breezepilot.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/usr/bin/curl -fsS --connect-timeout 3 --max-time 8 http://127.0.0.1:8000/api/health >/dev/null || /usr/bin/systemctl restart breezepilot.service'

@@ -1,1 +1,0 @@
-"""Withdrawal readiness helpers."""

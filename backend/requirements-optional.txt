@@ -1,0 +1,6 @@
+# Optional Phase 13 strategy-lab tooling.
+# Install only on a machine intended for after-market research jobs.
+vectorbt>=0.28,<1
+optuna>=4,<5
+mlflow>=3,<4
+arize-phoenix>=11,<12

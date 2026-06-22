@@ -132,7 +132,10 @@ class AutomationRunner:
                 if self.config.automation_enabled and bool(state["enabled"]):
                     # Scheduled automation should remain idle outside market hours.
                     # Manual Run Once still records a clear "Market is closed" result.
-                    if not self.config.enforce_market_hours or is_market_open():
+                    if (
+                        (not self.config.enforce_market_hours or is_market_open())
+                        and self._scheduled_cycle_due(state)
+                    ):
                         await self.run_once(manual=False)
             except Exception as exc:  # pragma: no cover - defensive loop guard
                 self.store.insert_automation_event(
@@ -141,6 +144,50 @@ class AutomationRunner:
                     message=str(exc),
                 )
             await asyncio.sleep(5)
+
+    def _scheduled_cycle_due(self, state: dict[str, object]) -> bool:
+        if self.config.trading_mode == "paper":
+            runtime = self.store.get_runtime()
+            if not runtime.autopilot_enabled:
+                return False
+            monitor_due = self._due(
+                state.get("last_paper_monitor_at"),
+                self.config.auto_paper_monitor_interval_seconds,
+            )
+            if (
+                self.config.enforce_market_hours
+                and self.store.get_settings().mode == "intraday"
+                and is_intraday_square_off_time()
+            ):
+                return monitor_due
+            return monitor_due or self._due(
+                state.get("last_paper_scan_at"),
+                self.config.auto_paper_scan_interval_seconds,
+            )
+
+        if self.config.is_live_mode:
+            exit_due = (
+                self.config.auto_live_exits_enabled
+                and self._due(
+                    state.get("last_live_exit_at"),
+                    self.config.auto_live_exit_interval_seconds,
+                )
+            )
+            entry_due = (
+                self.config.auto_live_entries_enabled
+                and self.config.auto_live_exits_enabled
+                and not (
+                    self.config.enforce_market_hours
+                    and is_intraday_square_off_time()
+                )
+                and self._due(
+                    state.get("last_live_entry_at"),
+                    self.config.auto_live_entry_interval_seconds,
+                )
+            )
+            return exit_due or entry_due
+
+        return False
 
     async def run_once(self, *, manual: bool = True) -> AutomationRun:
         async with self._lock:

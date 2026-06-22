@@ -141,6 +141,7 @@ def create_app(
 
     app = FastAPI(title="BreezePilot Backend", version="0.1.0", lifespan=lifespan)
     app.state.improvement_service = improvement_service
+    app.state.automation_runner = automation_runner
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

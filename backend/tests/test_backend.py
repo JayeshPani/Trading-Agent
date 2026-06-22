@@ -1277,6 +1277,31 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(len(client.get("/api/trades/open", headers=headers).json()), 1)
         self.assertEqual(client.app.state.fake_breeze.place_order_calls, 0)
 
+    def test_scheduler_waits_for_monitor_interval_after_intraday_square_off(self) -> None:
+        client, tempdir, store = make_client(
+            automation_enabled=True,
+            auto_paper_monitor_interval_seconds=30,
+            enforce_market_hours=True,
+        )
+        self.addCleanup(store.close)
+        self.addCleanup(tempdir.cleanup)
+        runtime = store.get_runtime()
+        runtime.autopilot_enabled = True
+        store.save_runtime(runtime)
+        settings = store.get_settings()
+        settings.mode = "intraday"
+        store.save_settings(settings)
+        store.update_automation_timestamp("last_paper_monitor_at")
+        state = store.get_automation_state()
+
+        with patch(
+            "backend.app.automation.is_intraday_square_off_time",
+            return_value=True,
+        ):
+            due = client.app.state.automation_runner._scheduled_cycle_due(state)
+
+        self.assertFalse(due)
+
     def test_agent_paper_cycle_respects_scanner_symbol_cap(self) -> None:
         client, tempdir, store = make_client(
             hermes_enabled=True,

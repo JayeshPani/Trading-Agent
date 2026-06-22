@@ -17,8 +17,12 @@ from .schemas import (
     AutomationStatus,
     BacktestMetrics,
     BacktestRun,
+    ChampionRollout,
+    ConstrainedStrategyRule,
     DailyReport,
+    DailyImprovementReview,
     Explanation,
+    ImprovementLesson,
     ImprovementRun,
     LiveOrder,
     OpenTrade,
@@ -26,6 +30,7 @@ from .schemas import (
     ScannerCandidate,
     ScannerResult,
     StrategyVersion,
+    StrategyValidation,
     StrategyTemplate,
     TradeHistoryItem,
     TradingSettings,
@@ -252,6 +257,70 @@ class SQLiteStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS daily_improvement_reviews (
+                    id TEXT PRIMARY KEY,
+                    trading_day TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    successes TEXT NOT NULL,
+                    mistakes TEXT NOT NULL,
+                    entry_timing_notes TEXT NOT NULL,
+                    exit_timing_notes TEXT NOT NULL,
+                    evidence_counts TEXT NOT NULL,
+                    created_version_id TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS improvement_lessons (
+                    id TEXT PRIMARY KEY,
+                    review_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    evidence_count INTEGER NOT NULL,
+                    active INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS strategy_rules (
+                    version_id TEXT PRIMARY KEY,
+                    rule TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS shadow_trades (
+                    id TEXT PRIMARY KEY,
+                    version_id TEXT NOT NULL,
+                    stock TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    target REAL NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    pnl REAL NOT NULL DEFAULT 0,
+                    exit_reason TEXT,
+                    trading_day TEXT NOT NULL,
+                    opened_at TEXT NOT NULL,
+                    closed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS improvement_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    health TEXT NOT NULL,
+                    last_review_day TEXT,
+                    last_run_at TEXT,
+                    latest_error TEXT,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS champion_rollout (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    champion_version_id TEXT,
+                    stage_percent INTEGER NOT NULL,
+                    stage_started_at TEXT NOT NULL,
+                    rollback_reason TEXT,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS strategy_versions (
                     id TEXT PRIMARY KEY,
                     strategy TEXT NOT NULL,
@@ -374,6 +443,11 @@ class SQLiteStore:
             )
             self._ensure_column("automation_state", "last_broker_success_at", "TEXT")
             self._ensure_column("automation_state", "latest_broker_error", "TEXT")
+            self._ensure_column(
+                "champion_rollout",
+                "stage_started_at",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             self._backfill_agent_integrity()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -1311,6 +1385,460 @@ class SQLiteStore:
             ).fetchall()
         return [self._improvement_from_row(row) for row in rows]
 
+    def improvement_evidence(self, trading_day: str, *, limit: int = 100) -> dict[str, Any]:
+        with self._lock:
+            trades = self._conn.execute(
+                """
+                SELECT id, stock, side, quantity, entry_price, exit_price, pnl, strategy,
+                       status, exit_reason, opened_at, closed_at
+                FROM trades
+                WHERE paper = 1
+                  AND (
+                        substr(opened_at, 1, 10) = ?
+                        OR substr(closed_at, 1, 10) = ?
+                      )
+                ORDER BY COALESCE(closed_at, opened_at) DESC
+                LIMIT ?
+                """,
+                (trading_day, trading_day, limit),
+            ).fetchall()
+            decisions = self._conn.execute(
+                """
+                SELECT action, stock, strategy, confidence, reasons, risks,
+                       risk_decision, risk_reason, integrity_status, source, created_at
+                FROM agent_decisions
+                WHERE substr(created_at, 1, 10) = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (trading_day, limit),
+            ).fetchall()
+            risks = self._conn.execute(
+                """
+                SELECT decision, reason, stock, details, created_at
+                FROM risk_events
+                WHERE substr(created_at, 1, 10) = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (trading_day, limit),
+            ).fetchall()
+            automation = self._conn.execute(
+                """
+                SELECT event_type, severity, message, created_at
+                FROM automation_events
+                WHERE substr(created_at, 1, 10) = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (trading_day, limit),
+            ).fetchall()
+        return {
+            "tradingDay": trading_day,
+            "trades": [dict(row) for row in trades],
+            "decisions": [
+                {
+                    **dict(row),
+                    "reasons": json.loads(row["reasons"]),
+                    "risks": json.loads(row["risks"]),
+                }
+                for row in decisions
+            ],
+            "riskEvents": [
+                {**dict(row), "details": json.loads(row["details"])}
+                for row in risks
+            ],
+            "automationEvents": [dict(row) for row in automation],
+        }
+
+    def save_improvement_review(self, review: DailyImprovementReview) -> None:
+        payload = review.model_dump(by_alias=False)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO daily_improvement_reviews (
+                    id, trading_day, status, summary, successes, mistakes,
+                    entry_timing_notes, exit_timing_notes, evidence_counts,
+                    created_version_id, error, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trading_day) DO UPDATE SET
+                    id = excluded.id,
+                    status = excluded.status,
+                    summary = excluded.summary,
+                    successes = excluded.successes,
+                    mistakes = excluded.mistakes,
+                    entry_timing_notes = excluded.entry_timing_notes,
+                    exit_timing_notes = excluded.exit_timing_notes,
+                    evidence_counts = excluded.evidence_counts,
+                    created_version_id = excluded.created_version_id,
+                    error = excluded.error,
+                    created_at = excluded.created_at
+                """,
+                (
+                    payload["id"],
+                    payload["trading_day"],
+                    payload["status"],
+                    payload["summary"],
+                    json.dumps(payload["successes"]),
+                    json.dumps(payload["mistakes"]),
+                    json.dumps(payload["entry_timing_notes"]),
+                    json.dumps(payload["exit_timing_notes"]),
+                    json.dumps(payload["evidence_counts"]),
+                    payload["created_version_id"],
+                    payload["error"],
+                    payload["created_at"],
+                ),
+            )
+
+    def list_improvement_reviews(self, limit: int = 30) -> list[DailyImprovementReview]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM daily_improvement_reviews
+                ORDER BY trading_day DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._improvement_review_from_row(row) for row in rows]
+
+    def get_improvement_review(self, trading_day: str) -> DailyImprovementReview | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM daily_improvement_reviews WHERE trading_day = ?",
+                (trading_day,),
+            ).fetchone()
+        return self._improvement_review_from_row(row) if row else None
+
+    def replace_review_lessons(self, review_id: str, lessons: list[str]) -> None:
+        timestamp = utc_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE improvement_lessons SET active = 0 WHERE review_id = ?",
+                (review_id,),
+            )
+            for text in lessons:
+                normalized = " ".join(text.strip().split())[:500]
+                if not normalized:
+                    continue
+                existing = self._conn.execute(
+                    """
+                    SELECT id, evidence_count
+                    FROM improvement_lessons
+                    WHERE lower(text) = lower(?)
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (normalized,),
+                ).fetchone()
+                if existing:
+                    self._conn.execute(
+                        """
+                        UPDATE improvement_lessons
+                        SET evidence_count = ?, active = 1
+                        WHERE id = ?
+                        """,
+                        (int(existing["evidence_count"]) + 1, existing["id"]),
+                    )
+                else:
+                    self._conn.execute(
+                        """
+                        INSERT INTO improvement_lessons (
+                            id, review_id, text, evidence_count, active, created_at
+                        )
+                        VALUES (?, ?, ?, 1, 1, ?)
+                        """,
+                        (str(uuid.uuid4()), review_id, normalized, timestamp),
+                    )
+            active_rows = self._conn.execute(
+                """
+                SELECT id FROM improvement_lessons
+                WHERE active = 1
+                ORDER BY evidence_count DESC, created_at DESC
+                """
+            ).fetchall()
+            for row in active_rows[12:]:
+                self._conn.execute(
+                    "UPDATE improvement_lessons SET active = 0 WHERE id = ?",
+                    (row["id"],),
+                )
+
+    def list_improvement_lessons(self, *, active_only: bool = False) -> list[ImprovementLesson]:
+        query = "SELECT * FROM improvement_lessons"
+        if active_only:
+            query += " WHERE active = 1"
+        query += " ORDER BY evidence_count DESC, created_at DESC"
+        with self._lock:
+            rows = self._conn.execute(query).fetchall()
+        return [self._improvement_lesson_from_row(row) for row in rows]
+
+    def save_strategy_rule(self, version_id: str, rule: ConstrainedStrategyRule) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO strategy_rules (version_id, rule, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(version_id) DO UPDATE SET rule = excluded.rule
+                """,
+                (version_id, json.dumps(rule.model_dump(by_alias=True)), utc_iso()),
+            )
+
+    def get_strategy_rule(self, version_id: str) -> ConstrainedStrategyRule | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT rule FROM strategy_rules WHERE version_id = ?",
+                (version_id,),
+            ).fetchone()
+        return ConstrainedStrategyRule.model_validate_json(row["rule"]) if row else None
+
+    def list_shadow_open_trades(self, version_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM shadow_trades WHERE status = 'open'"
+        params: tuple[Any, ...] = ()
+        if version_id:
+            query += " AND version_id = ?"
+            params = (version_id,)
+        query += " ORDER BY opened_at DESC"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def insert_shadow_trade(
+        self,
+        *,
+        version_id: str,
+        stock: str,
+        entry_price: float,
+        stop_loss: float,
+        target: float,
+        quantity: int,
+    ) -> str:
+        trade_id = str(uuid.uuid4())
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO shadow_trades (
+                    id, version_id, stock, entry_price, stop_loss, target,
+                    quantity, status, trading_day, opened_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                """,
+                (
+                    trade_id,
+                    version_id,
+                    stock,
+                    entry_price,
+                    stop_loss,
+                    target,
+                    quantity,
+                    current_trading_day(),
+                    utc_iso(),
+                ),
+            )
+        return trade_id
+
+    def close_shadow_trade(
+        self,
+        trade_id: str,
+        *,
+        exit_price: float,
+        status: str,
+        exit_reason: str,
+    ) -> None:
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM shadow_trades WHERE id = ? AND status = 'open'",
+                (trade_id,),
+            ).fetchone()
+            if row is None:
+                return
+            pnl = (exit_price - float(row["entry_price"])) * int(row["quantity"])
+            self._conn.execute(
+                """
+                UPDATE shadow_trades
+                SET status = ?, pnl = ?, exit_reason = ?, closed_at = ?
+                WHERE id = ?
+                """,
+                (status, pnl, exit_reason, utc_iso(), trade_id),
+            )
+
+    def shadow_metrics(self, version_id: str) -> dict[str, Any]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT trading_day, pnl, status
+                FROM shadow_trades
+                WHERE version_id = ? AND status != 'open'
+                ORDER BY closed_at
+                """,
+                (version_id,),
+            ).fetchall()
+        gains = sum(float(row["pnl"]) for row in rows if float(row["pnl"]) > 0)
+        losses = abs(sum(float(row["pnl"]) for row in rows if float(row["pnl"]) < 0))
+        losses_by_day: dict[str, float] = {}
+        for row in rows:
+            if float(row["pnl"]) < 0:
+                losses_by_day[row["trading_day"]] = (
+                    losses_by_day.get(row["trading_day"], 0.0)
+                    + abs(float(row["pnl"]))
+                )
+        daily_limit = self.get_settings().daily_max_loss
+        return {
+            "days": len({row["trading_day"] for row in rows}),
+            "trades": len(rows),
+            "profitFactor": round(gains / losses, 2) if losses else round(gains, 2),
+            "dailyLossBreached": any(
+                loss >= daily_limit for loss in losses_by_day.values()
+            ),
+        }
+
+    def get_improvement_state(self) -> dict[str, Any]:
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM improvement_state WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO improvement_state (
+                        id, health, last_review_day, last_run_at, latest_error, updated_at
+                    )
+                    VALUES (1, 'idle', NULL, NULL, NULL, ?)
+                    """,
+                    (utc_iso(),),
+                )
+                row = self._conn.execute(
+                    "SELECT * FROM improvement_state WHERE id = 1"
+                ).fetchone()
+        return dict(row)
+
+    def update_improvement_state(
+        self,
+        *,
+        health: str,
+        last_review_day: str | None = None,
+        latest_error: str | None = None,
+    ) -> None:
+        state = self.get_improvement_state()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE improvement_state
+                SET health = ?,
+                    last_review_day = COALESCE(?, last_review_day),
+                    last_run_at = ?,
+                    latest_error = ?,
+                    updated_at = ?
+                WHERE id = 1
+                """,
+                (health, last_review_day, utc_iso(), latest_error, utc_iso()),
+            )
+
+    def get_champion_rollout(self) -> ChampionRollout:
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM champion_rollout WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO champion_rollout (
+                        id, champion_version_id, stage_percent, stage_started_at,
+                        rollback_reason, updated_at
+                    )
+                    VALUES (1, NULL, 0, ?, NULL, ?)
+                    """,
+                    (utc_iso(), utc_iso()),
+                )
+                row = self._conn.execute(
+                    "SELECT * FROM champion_rollout WHERE id = 1"
+                ).fetchone()
+        metrics = self.live_strategy_metrics(
+            row["champion_version_id"],
+            since=row["stage_started_at"] or None,
+        )
+        return ChampionRollout(
+            championVersionId=row["champion_version_id"],
+            stagePercent=row["stage_percent"],
+            liveDays=metrics["days"],
+            liveTrades=metrics["trades"],
+            liveProfitFactor=metrics["profitFactor"],
+            rollbackReason=row["rollback_reason"],
+            updatedAt=row["updated_at"],
+        )
+
+    def set_champion_rollout(
+        self,
+        *,
+        champion_version_id: str | None,
+        stage_percent: int,
+        rollback_reason: str | None = None,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO champion_rollout (
+                    id, champion_version_id, stage_percent, stage_started_at,
+                    rollback_reason, updated_at
+                )
+                VALUES (1, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    champion_version_id = excluded.champion_version_id,
+                    stage_percent = excluded.stage_percent,
+                    stage_started_at = excluded.stage_started_at,
+                    rollback_reason = excluded.rollback_reason,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    champion_version_id,
+                    stage_percent,
+                    utc_iso(),
+                    rollback_reason,
+                    utc_iso(),
+                ),
+            )
+
+    def live_strategy_metrics(
+        self,
+        version_id: str | None,
+        *,
+        since: str | None = None,
+    ) -> dict[str, Any]:
+        if not version_id:
+            return {"days": 0, "trades": 0, "profitFactor": 0.0, "maxDrawdown": 0.0}
+        version = self.get_strategy_version(version_id)
+        if version is None:
+            return {"days": 0, "trades": 0, "profitFactor": 0.0, "maxDrawdown": 0.0}
+        since_filter = "AND closed_at >= ?" if since else ""
+        params: tuple[Any, ...] = (version.strategy, since) if since else (version.strategy,)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT substr(closed_at, 1, 10) AS trading_day, pnl
+                FROM trades
+                WHERE paper = 0
+                  AND status != 'open'
+                  AND strategy = ?
+                  AND closed_at IS NOT NULL
+                  {since_filter}
+                ORDER BY closed_at
+                """,
+                params,
+            ).fetchall()
+        gains = sum(float(row["pnl"]) for row in rows if float(row["pnl"]) > 0)
+        losses = abs(sum(float(row["pnl"]) for row in rows if float(row["pnl"]) < 0))
+        equity = peak = drawdown = 0.0
+        for row in rows:
+            equity += float(row["pnl"])
+            peak = max(peak, equity)
+            drawdown = max(drawdown, peak - equity)
+        return {
+            "days": len({row["trading_day"] for row in rows}),
+            "trades": len(rows),
+            "profitFactor": round(gains / losses, 2) if losses else round(gains, 2),
+            "maxDrawdown": round(drawdown, 2),
+        }
+
     def get_safety_state(self) -> dict[str, Any]:
         with self._lock, self._conn:
             row = self._conn.execute("SELECT * FROM safety_state WHERE id = 1").fetchone()
@@ -1935,6 +2463,34 @@ class SQLiteStore:
             toolsAvailable=json.loads(row["tools_available"]),
             createdVersionId=row["created_version_id"],
             reason=row["reason"],
+            createdAt=row["created_at"],
+        )
+
+    @staticmethod
+    def _improvement_review_from_row(row: sqlite3.Row) -> DailyImprovementReview:
+        return DailyImprovementReview(
+            id=row["id"],
+            tradingDay=row["trading_day"],
+            status=row["status"],
+            summary=row["summary"],
+            successes=json.loads(row["successes"]),
+            mistakes=json.loads(row["mistakes"]),
+            entryTimingNotes=json.loads(row["entry_timing_notes"]),
+            exitTimingNotes=json.loads(row["exit_timing_notes"]),
+            evidenceCounts=json.loads(row["evidence_counts"]),
+            createdVersionId=row["created_version_id"],
+            error=row["error"],
+            createdAt=row["created_at"],
+        )
+
+    @staticmethod
+    def _improvement_lesson_from_row(row: sqlite3.Row) -> ImprovementLesson:
+        return ImprovementLesson(
+            id=row["id"],
+            reviewId=row["review_id"],
+            text=row["text"],
+            evidenceCount=row["evidence_count"],
+            active=bool(row["active"]),
             createdAt=row["created_at"],
         )
 

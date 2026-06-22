@@ -18,12 +18,16 @@ import type {
   AutomationEvent,
   AutomationStatus,
   BacktestRun,
+  ChampionRollout,
   ChampionState,
   ConnectionState,
   DailyReport,
+  DailyImprovementReview,
   DashboardResponse,
   Explanation,
   ImprovementRun,
+  ImprovementLesson,
+  ImprovementStatus,
   LiveAutopilotStatus,
   LiveOrder,
   LiveReadiness,
@@ -66,6 +70,10 @@ function App() {
   const [automationEvents, setAutomationEvents] = useState<AutomationEvent[]>([]);
   const [paperValidation, setPaperValidation] = useState<PaperValidationStatus | null>(null);
   const [improvementRuns, setImprovementRuns] = useState<ImprovementRun[]>([]);
+  const [improvementStatus, setImprovementStatus] = useState<ImprovementStatus | null>(null);
+  const [improvementReviews, setImprovementReviews] = useState<DailyImprovementReview[]>([]);
+  const [improvementLessons, setImprovementLessons] = useState<ImprovementLesson[]>([]);
+  const [championRollout, setChampionRollout] = useState<ChampionRollout | null>(null);
   const [strategyVersions, setStrategyVersions] = useState<StrategyVersion[]>([]);
   const [championState, setChampionState] = useState<ChampionState | null>(null);
   const [safetyStatus, setSafetyStatus] = useState<SafetyStatus | null>(null);
@@ -193,8 +201,12 @@ function App() {
         automationEventsResult,
         paperValidationResult,
         improvementResult,
+        improvementStatusResult,
+        improvementReviewsResult,
+        improvementLessonsResult,
         versionsResult,
         championResult,
+        championRolloutResult,
         safetyResult,
         auditResult
       ] = await Promise.all([
@@ -215,8 +227,12 @@ function App() {
         api.getAutomationEvents(savedBackendUrl, authToken),
         api.getPaperValidation(savedBackendUrl, authToken),
         api.getImprovementRuns(savedBackendUrl, authToken),
+        api.getImprovementStatus(savedBackendUrl, authToken),
+        api.getImprovementReviews(savedBackendUrl, authToken),
+        api.getImprovementLessons(savedBackendUrl, authToken),
         api.getStrategyVersions(savedBackendUrl, authToken),
         api.getChampion(savedBackendUrl, authToken),
+        api.getChampionRollout(savedBackendUrl, authToken),
         api.getSafetyStatus(savedBackendUrl, authToken),
         api.getAudit(savedBackendUrl, authToken)
       ]);
@@ -277,11 +293,23 @@ function App() {
       if (improvementResult.data) {
         setImprovementRuns(improvementResult.data);
       }
+      if (improvementStatusResult.data) {
+        setImprovementStatus(improvementStatusResult.data);
+      }
+      if (improvementReviewsResult.data) {
+        setImprovementReviews(improvementReviewsResult.data);
+      }
+      if (improvementLessonsResult.data) {
+        setImprovementLessons(improvementLessonsResult.data);
+      }
       if (versionsResult.data) {
         setStrategyVersions(versionsResult.data);
       }
       if (championResult.data) {
         setChampionState(championResult.data);
+      }
+      if (championRolloutResult.data) {
+        setChampionRollout(championRolloutResult.data);
       }
       if (safetyResult.data) {
         setSafetyStatus(safetyResult.data);
@@ -581,15 +609,38 @@ function App() {
     }
 
     setImprovementRuns((current) => [result.data as ImprovementRun, ...current]);
-    const [versionsResult, championResult] = await Promise.all([
+    const [
+      versionsResult,
+      championResult,
+      statusResult,
+      reviewsResult,
+      lessonsResult,
+      rolloutResult
+    ] = await Promise.all([
       api.getStrategyVersions(savedBackendUrl, authToken),
-      api.getChampion(savedBackendUrl, authToken)
+      api.getChampion(savedBackendUrl, authToken),
+      api.getImprovementStatus(savedBackendUrl, authToken),
+      api.getImprovementReviews(savedBackendUrl, authToken),
+      api.getImprovementLessons(savedBackendUrl, authToken),
+      api.getChampionRollout(savedBackendUrl, authToken)
     ]);
     if (versionsResult.data) {
       setStrategyVersions(versionsResult.data);
     }
     if (championResult.data) {
       setChampionState(championResult.data);
+    }
+    if (statusResult.data) {
+      setImprovementStatus(statusResult.data);
+    }
+    if (reviewsResult.data) {
+      setImprovementReviews(reviewsResult.data);
+    }
+    if (lessonsResult.data) {
+      setImprovementLessons(lessonsResult.data);
+    }
+    if (rolloutResult.data) {
+      setChampionRollout(rolloutResult.data);
     }
     setNotice(result.data.reason);
   }
@@ -974,8 +1025,12 @@ function App() {
           {activeTab === "lab" && (
             <StrategyLabTab
               improvementRuns={improvementRuns}
+              improvementStatus={improvementStatus}
+              improvementReviews={improvementReviews}
+              improvementLessons={improvementLessons}
               strategyVersions={strategyVersions}
               championState={championState}
+              championRollout={championRollout}
               isCommandRunning={isCommandRunning}
               runImprovement={() => void handleRunImprovement()}
               promoteChallenger={(versionId) => void handlePromoteChallenger(versionId)}
@@ -1999,16 +2054,24 @@ function LiveOrdersTab({
 
 function StrategyLabTab({
   improvementRuns,
+  improvementStatus,
+  improvementReviews,
+  improvementLessons,
   strategyVersions,
   championState,
+  championRollout,
   isCommandRunning,
   runImprovement,
   promoteChallenger,
   rollbackChampion
 }: {
   improvementRuns: ImprovementRun[];
+  improvementStatus: ImprovementStatus | null;
+  improvementReviews: DailyImprovementReview[];
+  improvementLessons: ImprovementLesson[];
   strategyVersions: StrategyVersion[];
   championState: ChampionState | null;
+  championRollout: ChampionRollout | null;
   isCommandRunning: boolean;
   runImprovement: () => void;
   promoteChallenger: (versionId: string) => void;
@@ -2044,6 +2107,20 @@ function StrategyLabTab({
             </button>
           </div>
         </div>
+        <div className="metric-grid">
+          <Metric label="Improvement" value={improvementStatus?.health ?? "unknown"} tone={improvementStatus?.health === "failed" ? "negative" : improvementStatus?.health === "healthy" ? "positive" : undefined} />
+          <Metric label="Daily review" value={improvementStatus?.enabled ? improvementStatus.scheduledTimeIst : "off"} />
+          <Metric label="Active lessons" value={String(improvementStatus?.activeLessons ?? 0)} />
+          <Metric label="Auto promotion" value={improvementStatus?.autoPromotionEnabled ? "enabled" : "off"} tone={improvementStatus?.autoPromotionEnabled ? "positive" : undefined} />
+          <Metric label="Capital stage" value={`${championRollout?.stagePercent ?? 0}%`} />
+          <Metric label="Live evidence" value={`${championRollout?.liveDays ?? 0}d / ${championRollout?.liveTrades ?? 0}t`} />
+        </div>
+        {championRollout?.rollbackReason && (
+          <div className="risk-decision rejected">
+            <strong>Latest rollback</strong>
+            <span>{championRollout.rollbackReason}</span>
+          </div>
+        )}
         <TradeTable
           emptyText="No challengers."
           headers={["Strategy", "Version", "Status", "PF", "Drawdown"]}
@@ -2073,15 +2150,43 @@ function StrategyLabTab({
       </section>
 
       <section className="panel">
+        <h2>Daily Reviews</h2>
+        <TradeTable
+          emptyText="No daily improvement reviews yet."
+          headers={["Day", "Status", "Summary", "Mistakes"]}
+          rows={improvementReviews.map((review) => [
+            review.tradingDay,
+            review.status,
+            review.summary,
+            review.mistakes.join("; ") || "-"
+          ])}
+        />
+      </section>
+
+      <section className="panel">
+        <h2>Learned Lessons</h2>
+        <TradeTable
+          emptyText="No evidence-backed lessons yet."
+          headers={["State", "Evidence", "Lesson", "Created"]}
+          rows={improvementLessons.map((lesson) => [
+            lesson.active ? "active" : "archived",
+            String(lesson.evidenceCount),
+            lesson.text,
+            formatDate(lesson.createdAt)
+          ])}
+        />
+      </section>
+
+      <section className="panel">
         <h2>Strategy Versions</h2>
         <TradeTable
           emptyText="No strategy versions recorded."
-          headers={["Strategy", "Version", "Status", "Notes"]}
+          headers={["Strategy", "Version", "Status", "Rule / Notes"]}
           rows={strategyVersions.map((version) => [
             version.strategy,
             version.version,
             version.promotionStatus,
-            version.riskNotes[0] ?? "-"
+            String(version.parameters.description ?? version.riskNotes[0] ?? "-")
           ])}
         />
       </section>

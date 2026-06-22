@@ -9,12 +9,16 @@ import type {
   AutomationRun,
   AutomationStatus,
   BacktestRun,
+  ChampionRollout,
   ChampionState,
   CredentialsStatus,
+  DailyImprovementReview,
   DailyReport,
   DashboardResponse,
   Explanation,
   ImprovementRun,
+  ImprovementLesson,
+  ImprovementStatus,
   LiveAutopilotStatus,
   LiveOrder,
   LiveReadiness,
@@ -24,6 +28,7 @@ import type {
   ScannerResult,
   SetupStatus,
   StrategyEligibility,
+  StrategyValidation,
   StrategyTemplate,
   StrategyVersion,
   TradeHistoryItem,
@@ -318,10 +323,29 @@ export const api = {
     ),
   getImprovementRuns: (backendUrl: string, authToken?: string) =>
     request<ImprovementRun[]>(backendUrl, "/api/improvement/runs", {}, authToken),
+  getImprovementStatus: (backendUrl: string, authToken?: string) =>
+    request<ImprovementStatus>(backendUrl, "/api/improvement/status", {}, authToken),
+  getImprovementReviews: (backendUrl: string, authToken?: string) =>
+    request<DailyImprovementReview[]>(backendUrl, "/api/improvement/reviews", {}, authToken),
+  getImprovementLessons: (backendUrl: string, authToken?: string) =>
+    request<ImprovementLesson[]>(backendUrl, "/api/improvement/lessons", {}, authToken),
   getStrategyVersions: (backendUrl: string, authToken?: string) =>
     request<StrategyVersion[]>(backendUrl, "/api/strategy-versions", {}, authToken),
+  getStrategyValidation: (
+    backendUrl: string,
+    versionId: string,
+    authToken?: string
+  ) =>
+    request<StrategyValidation>(
+      backendUrl,
+      `/api/strategy-versions/${encodeURIComponent(versionId)}/validation`,
+      {},
+      authToken
+    ),
   getChampion: (backendUrl: string, authToken?: string) =>
     request<ChampionState>(backendUrl, "/api/champion", {}, authToken),
+  getChampionRollout: (backendUrl: string, authToken?: string) =>
+    request<ChampionRollout>(backendUrl, "/api/champion/rollout", {}, authToken),
   getChallengers: (backendUrl: string, authToken?: string) =>
     request<StrategyVersion[]>(backendUrl, "/api/challengers", {}, authToken),
   promoteChallenger: (backendUrl: string, versionId: string, authToken?: string) =>

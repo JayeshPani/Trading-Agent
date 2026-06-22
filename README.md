@@ -70,9 +70,14 @@ See [backend/README.md](backend/README.md) for backend setup and run commands, a
 - `GET /api/live/autopilot/status`
 - `POST /api/improvement/run-after-market`
 - `GET /api/improvement/runs`
+- `GET /api/improvement/status`
+- `GET /api/improvement/reviews`
+- `GET /api/improvement/lessons`
 - `GET /api/strategy-versions`
 - `GET /api/strategy-versions/{version_id}`
+- `GET /api/strategy-versions/{version_id}/validation`
 - `GET /api/champion`
+- `GET /api/champion/rollout`
 - `GET /api/challengers`
 - `POST /api/challengers/{version_id}/promote`
 - `POST /api/champion/rollback`
@@ -84,6 +89,11 @@ See [backend/README.md](backend/README.md) for backend setup and run commands, a
 - `GET /api/trades/open`
 - `GET /api/trades/history`
 - `GET /api/explanations/latest`
+
+Daily self-improvement uses stored paper-trading evidence to create bounded lessons and
+constrained JSON challengers. Generated code is never executed. Challengers remain in
+isolated shadow trading until backtest and paper gates pass, then use staged capital
+rollout with rollback checks. This process cannot guarantee profit.
 
 The popup polls `/api/dashboard` every 5 seconds. No WebSockets are used in Part 1.
 

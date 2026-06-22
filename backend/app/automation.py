@@ -9,6 +9,7 @@ from .advanced import AdvancedTradingService
 from .agent import AgentService
 from .breeze import BreezeClientError
 from .config import AppConfig
+from .improvement import SelfImprovementService
 from .schemas import (
     AgentDecisionResponse,
     AutomationEvent,
@@ -30,6 +31,7 @@ class AutomationRunner:
         trading_service: TradingService,
         agent_service: AgentService,
         advanced_service: AdvancedTradingService,
+        improvement_service: SelfImprovementService,
         credentials_ready,
     ):
         self.config = config
@@ -37,6 +39,7 @@ class AutomationRunner:
         self.trading_service = trading_service
         self.agent_service = agent_service
         self.advanced_service = advanced_service
+        self.improvement_service = improvement_service
         self.credentials_ready = credentials_ready
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
@@ -124,6 +127,8 @@ class AutomationRunner:
         while True:
             try:
                 state = self.store.get_automation_state()
+                if self.config.self_improvement_enabled:
+                    await asyncio.to_thread(self.improvement_service.run_scheduled_if_due)
                 if self.config.automation_enabled and bool(state["enabled"]):
                     # Scheduled automation should remain idle outside market hours.
                     # Manual Run Once still records a clear "Market is closed" result.
@@ -232,6 +237,7 @@ class AutomationRunner:
         monitor_had_failures = False
         if self._due(state["last_paper_monitor_at"], self.config.auto_paper_monitor_interval_seconds):
             result = self._monitor_paper_trades()
+            self.improvement_service.monitor_shadow_trades()
             monitor_had_failures = bool(result.failures)
             actions.append(f"monitored {len(result.open_trades)} open paper trade(s)")
             if result.failures:
@@ -358,6 +364,7 @@ class AutomationRunner:
 
     def _run_live_cycle(self) -> str:
         actions: list[str] = []
+        self.improvement_service.evaluate_rollout()
         settings = self.store.get_settings()
         intraday_cutoff = (
             self.config.enforce_market_hours

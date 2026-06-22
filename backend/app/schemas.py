@@ -13,6 +13,18 @@ RiskStatus = Literal["clear", "warning", "locked"]
 RiskDecisionValue = Literal["approved", "rejected", "pending", "none"]
 AgentIntegrityStatus = Literal["genuine", "repaired", "system_error"]
 AgentAction = Literal["SKIP", "PROPOSE_ENTRY", "PROPOSE_EXIT", "TIGHTEN_STOP", "HOLD"]
+ImprovementHealth = Literal["disabled", "idle", "running", "healthy", "failed"]
+RuleOperator = Literal["gt", "gte", "lt", "lte", "between"]
+StrategyRuleField = Literal[
+    "rsi",
+    "priceToVwap",
+    "trend",
+    "volumeSpike",
+    "volatility",
+    "liquidity",
+    "supportDistance",
+    "resistanceDistance",
+]
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9&-]{1,20}$")
 DERIVATIVE_MARKERS = ("FUT", "CE", "PE")
@@ -303,6 +315,142 @@ class ImprovementRun(BaseModel):
     created_version_id: str | None = Field(default=None, alias="createdVersionId")
     reason: str
     created_at: str = Field(alias="createdAt")
+
+
+class StrategyRuleCondition(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    field: StrategyRuleField
+    operator: RuleOperator
+    value: float | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @model_validator(mode="after")
+    def validate_operands(self) -> "StrategyRuleCondition":
+        if self.operator == "between":
+            if self.minimum is None or self.maximum is None or self.minimum >= self.maximum:
+                raise ValueError("between conditions require minimum < maximum.")
+        elif self.value is None:
+            raise ValueError("comparison conditions require value.")
+        return self
+
+
+class ConstrainedStrategyRule(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    name: str = Field(min_length=3, max_length=60)
+    description: str = Field(min_length=5, max_length=240)
+    conditions: list[StrategyRuleCondition] = Field(min_length=2, max_length=6)
+    minimum_score: float = Field(default=60, alias="minimumScore", ge=0, le=100)
+    stop_loss_percent: float = Field(alias="stopLossPercent", gt=0, le=5)
+    target_percent: float = Field(alias="targetPercent", gt=0, le=10)
+    entry_start_ist: str = Field(default="09:20", alias="entryStartIst")
+    entry_end_ist: str = Field(default="15:10", alias="entryEndIst")
+
+    @field_validator("entry_start_ist", "entry_end_ist")
+    @classmethod
+    def validate_clock(cls, value: str) -> str:
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError("time must use HH:MM.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_rule(self) -> "ConstrainedStrategyRule":
+        if self.entry_start_ist >= self.entry_end_ist:
+            raise ValueError("entryStartIst must be before entryEndIst.")
+        if self.entry_end_ist > "15:10":
+            raise ValueError("generated strategies cannot enter after 15:10 IST.")
+        if self.target_percent <= self.stop_loss_percent:
+            raise ValueError("targetPercent must be greater than stopLossPercent.")
+        fields = [condition.field for condition in self.conditions]
+        if len(fields) != len(set(fields)):
+            raise ValueError("strategy conditions must use unique indicators.")
+        return self
+
+
+class ImprovementReviewDraft(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    summary: str = Field(min_length=5, max_length=500)
+    successes: list[str] = Field(default_factory=list, max_length=8)
+    mistakes: list[str] = Field(default_factory=list, max_length=8)
+    lessons: list[str] = Field(min_length=1, max_length=8)
+    entry_timing_notes: list[str] = Field(default_factory=list, alias="entryTimingNotes", max_length=6)
+    exit_timing_notes: list[str] = Field(default_factory=list, alias="exitTimingNotes", max_length=6)
+    challenger: ConstrainedStrategyRule | None = None
+
+
+class DailyImprovementReview(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    trading_day: str = Field(alias="tradingDay")
+    status: Literal["completed", "failed", "insufficient_data"]
+    summary: str
+    successes: list[str] = Field(default_factory=list)
+    mistakes: list[str] = Field(default_factory=list)
+    entry_timing_notes: list[str] = Field(default_factory=list, alias="entryTimingNotes")
+    exit_timing_notes: list[str] = Field(default_factory=list, alias="exitTimingNotes")
+    evidence_counts: dict[str, int] = Field(default_factory=dict, alias="evidenceCounts")
+    created_version_id: str | None = Field(default=None, alias="createdVersionId")
+    error: str | None = None
+    created_at: str = Field(alias="createdAt")
+
+
+class ImprovementLesson(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    review_id: str = Field(alias="reviewId")
+    text: str
+    evidence_count: int = Field(alias="evidenceCount", ge=1)
+    active: bool = True
+    created_at: str = Field(alias="createdAt")
+
+
+class StrategyValidation(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    version_id: str = Field(alias="versionId")
+    backtest_passed: bool = Field(alias="backtestPassed")
+    backtest_reason: str = Field(alias="backtestReason")
+    shadow_days: int = Field(alias="shadowDays")
+    shadow_trades: int = Field(alias="shadowTrades")
+    shadow_profit_factor: float = Field(alias="shadowProfitFactor")
+    shadow_daily_loss_breached: bool = Field(alias="shadowDailyLossBreached")
+    errors_clear: bool = Field(alias="errorsClear")
+    champion_comparison_passed: bool = Field(alias="championComparisonPassed")
+    eligible_for_promotion: bool = Field(alias="eligibleForPromotion")
+    reason: str
+
+
+class ChampionRollout(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    champion_version_id: str | None = Field(default=None, alias="championVersionId")
+    stage_percent: int = Field(default=0, alias="stagePercent")
+    live_days: int = Field(default=0, alias="liveDays")
+    live_trades: int = Field(default=0, alias="liveTrades")
+    live_profit_factor: float = Field(default=0, alias="liveProfitFactor")
+    rollback_reason: str | None = Field(default=None, alias="rollbackReason")
+    updated_at: str = Field(alias="updatedAt")
+
+
+class ImprovementStatus(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool
+    health: ImprovementHealth
+    scheduled_time_ist: str = Field(alias="scheduledTimeIst")
+    auto_promotion_enabled: bool = Field(alias="autoPromotionEnabled")
+    last_review_day: str | None = Field(default=None, alias="lastReviewDay")
+    last_run_at: str | None = Field(default=None, alias="lastRunAt")
+    latest_error: str | None = Field(default=None, alias="latestError")
+    active_lessons: int = Field(alias="activeLessons")
+    challengers: int
+    rollout: ChampionRollout
+    message: str
 
 
 class StrategyVersion(BaseModel):

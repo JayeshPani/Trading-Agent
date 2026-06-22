@@ -18,6 +18,10 @@ PROFILES: dict[str, dict[str, str]] = {
         "HERMES_MODEL": "kimi-k2.6",
         "HERMES_TIMEOUT_SECONDS": "60",
         "SCANNER_MAX_SYMBOLS_PER_CYCLE": "20",
+        "SELF_IMPROVEMENT_ENABLED": "true",
+        "SELF_IMPROVEMENT_TIME_IST": "15:45",
+        "AUTO_CHALLENGER_PROMOTION": "true",
+        "CHALLENGER_CANARY_PERCENT": "10",
     },
     "manual-live": {
         "TRADING_MODE": "live",
@@ -105,6 +109,10 @@ def _render_env(values: dict[str, str]) -> str:
         "SCANNER_MAX_SYMBOLS_PER_CYCLE",
         "AUTO_LIVE_EXITS_ENABLED",
         "AUTO_LIVE_ENTRIES_ENABLED",
+        "SELF_IMPROVEMENT_ENABLED",
+        "SELF_IMPROVEMENT_TIME_IST",
+        "AUTO_CHALLENGER_PROMOTION",
+        "CHALLENGER_CANARY_PERCENT",
     ]
     keys = [key for key in preferred_order if key in values]
     keys.extend(sorted(key for key in values if key not in set(keys)))

@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from .advanced import AdvancedTradingService
 from .breeze import BreezeClient
 from .config import AppConfig
+from .improvement import SelfImprovementService
 from .risk import ProposedTrade, RiskEngine, RiskResult
 from .scanner import APPROVED_STRATEGIES, MarketScanner
 from .schemas import (
@@ -205,7 +206,11 @@ def parse_hermes_decision(content: str) -> AgentDecisionDraft:
         detail = f" Invalid fields: {', '.join(fields)}." if fields else ""
         raise HermesClientError(f"Hermes returned invalid structured JSON.{detail}") from exc
 
-    if draft.strategy and draft.strategy not in APPROVED_STRATEGY_NAMES:
+    if (
+        draft.strategy
+        and draft.strategy not in APPROVED_STRATEGY_NAMES
+        and not draft.strategy.startswith("Adaptive: ")
+    ):
         raise HermesClientError("Hermes selected an unsupported strategy.")
     if draft.stock:
         stock = normalize_symbol(draft.stock)
@@ -259,6 +264,7 @@ class AgentService:
         risk_engine: RiskEngine,
         breeze_client: BreezeClient,
         advanced_service: AdvancedTradingService,
+        improvement_service: SelfImprovementService | None = None,
         hermes_client: HermesClient | None = None,
         scanner: MarketScanner | None = None,
     ):
@@ -267,6 +273,7 @@ class AgentService:
         self.risk_engine = risk_engine
         self.breeze_client = breeze_client
         self.advanced_service = advanced_service
+        self.improvement_service = improvement_service
         self.hermes_client = hermes_client or HermesClient(config)
         self.scanner = scanner or MarketScanner(breeze_client)
 
@@ -325,6 +332,10 @@ class AgentService:
                 detail=scanner_result.broker_error
                 or "Breeze market data is temporarily unavailable.",
             )
+        if self.improvement_service is not None:
+            self.improvement_service.process_shadow_cycle(scanner_result)
+            scanner_result = self.improvement_service.apply_champion_rule(scanner_result)
+            self.store.save_scanner_result(scanner_result)
         context = self._build_context(source, scanner_result)
         run_id = self.store.create_agent_run(source=source, mode=self.config.trading_mode, context=context)
         self.store.save_portfolio_snapshot(context["portfolio"])
@@ -556,12 +567,36 @@ class AgentService:
             int((now_utc() - scanner_generated_at).total_seconds()),
             0,
         )
+        approved_strategies = [
+            strategy.model_dump(by_alias=True) for strategy in APPROVED_STRATEGIES
+        ]
+        champion = self.store.current_champion()
+        if champion and self.store.get_strategy_rule(champion.id):
+            approved_strategies.append(
+                {
+                    "name": champion.strategy,
+                    "version": champion.version,
+                    "description": str(
+                        champion.parameters.get(
+                            "description",
+                            "Validated constrained champion strategy.",
+                        )
+                    ),
+                }
+            )
         return {
             "source": source,
             "tradingMode": self.config.trading_mode,
             "marketClock": build_intraday_market_clock(),
             "rules": settings.model_dump(by_alias=True),
-            "approvedStrategies": [strategy.model_dump(by_alias=True) for strategy in APPROVED_STRATEGIES],
+            "approvedStrategies": approved_strategies,
+            "learnedLessons": [
+                {
+                    "text": lesson.text,
+                    "evidenceCount": lesson.evidence_count,
+                }
+                for lesson in self.store.list_improvement_lessons(active_only=True)
+            ],
             "scanner": {
                 "generatedAt": scanner_result.generated_at,
                 "generatedAtUtc": scanner_result.generated_at,

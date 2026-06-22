@@ -49,6 +49,10 @@ class AppConfig:
     scanner_max_symbols_per_cycle: int = 20
     auto_live_entries_enabled: bool = False
     auto_live_exits_enabled: bool = False
+    self_improvement_enabled: bool = False
+    self_improvement_time_ist: str = "15:45"
+    auto_challenger_promotion: bool = False
+    challenger_canary_percent: int = 10
 
     @property
     def is_live_mode(self) -> bool:
@@ -91,4 +95,11 @@ def load_config() -> AppConfig:
         scanner_max_symbols_per_cycle=int(os.getenv("SCANNER_MAX_SYMBOLS_PER_CYCLE", "20")),
         auto_live_entries_enabled=_env_bool("AUTO_LIVE_ENTRIES_ENABLED", False),
         auto_live_exits_enabled=_env_bool("AUTO_LIVE_EXITS_ENABLED", False),
+        self_improvement_enabled=_env_bool("SELF_IMPROVEMENT_ENABLED", False),
+        self_improvement_time_ist=os.getenv("SELF_IMPROVEMENT_TIME_IST", "15:45"),
+        auto_challenger_promotion=_env_bool("AUTO_CHALLENGER_PROMOTION", False),
+        challenger_canary_percent=max(
+            1,
+            min(int(os.getenv("CHALLENGER_CANARY_PERCENT", "10")), 100),
+        ),
     )

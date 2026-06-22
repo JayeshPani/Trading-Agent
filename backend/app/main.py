@@ -13,6 +13,7 @@ from .auth import AuthService
 from .breeze import BreezeClient
 from .config import AppConfig, load_config
 from .credentials import CredentialService
+from .improvement import SelfImprovementService
 from .rate_limit import RateLimiter
 from .risk import RiskEngine
 from .schemas import (
@@ -43,6 +44,9 @@ from .schemas import (
     Explanation,
     HealthResponse,
     ImprovementRun,
+    ImprovementLesson,
+    ImprovementStatus,
+    DailyImprovementReview,
     LiveAutopilotStatus,
     LiveOrder,
     LiveOrderPrepareRequest,
@@ -58,10 +62,12 @@ from .schemas import (
     ScannerResult,
     SetupStatus,
     StrategyEligibility,
+    StrategyValidation,
     StrategyTemplate,
     StrategyVersion,
     TradeHistoryItem,
     TradingSettings,
+    ChampionRollout,
 )
 from .store import SQLiteStore
 from .trading import TradingService
@@ -101,12 +107,18 @@ def create_app(
         breeze_client=app_breeze,
         credentials_ready=credential_service.breeze_credentials_saved,
     )
+    improvement_service = SelfImprovementService(
+        config=app_config,
+        store=app_store,
+        breeze_client=app_breeze,
+    )
     agent_service = AgentService(
         config=app_config,
         store=app_store,
         risk_engine=risk_engine,
         breeze_client=app_breeze,
         advanced_service=advanced_service,
+        improvement_service=improvement_service,
     )
     automation_runner = AutomationRunner(
         config=app_config,
@@ -114,6 +126,7 @@ def create_app(
         trading_service=service,
         agent_service=agent_service,
         advanced_service=advanced_service,
+        improvement_service=improvement_service,
         credentials_ready=credential_service.breeze_credentials_saved,
     )
     bearer = HTTPBearer(auto_error=False)
@@ -127,6 +140,7 @@ def create_app(
             await automation_runner.stop_background()
 
     app = FastAPI(title="BreezePilot Backend", version="0.1.0", lifespan=lifespan)
+    app.state.improvement_service = improvement_service
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -421,11 +435,27 @@ def create_app(
 
     @app.post("/api/improvement/run-after-market", response_model=ImprovementRun)
     def improvement_run(_token: str | None = Depends(require_auth)) -> ImprovementRun:
-        return advanced_service.run_improvement()
+        return improvement_service.retry_failed_review()
 
     @app.get("/api/improvement/runs", response_model=list[ImprovementRun])
     def improvement_runs(_token: str | None = Depends(require_auth)) -> list[ImprovementRun]:
         return advanced_service.list_improvement_runs()
+
+    @app.get("/api/improvement/status", response_model=ImprovementStatus)
+    def improvement_status(_token: str | None = Depends(require_auth)) -> ImprovementStatus:
+        return improvement_service.status()
+
+    @app.get("/api/improvement/reviews", response_model=list[DailyImprovementReview])
+    def improvement_reviews(
+        _token: str | None = Depends(require_auth),
+    ) -> list[DailyImprovementReview]:
+        return improvement_service.reviews()
+
+    @app.get("/api/improvement/lessons", response_model=list[ImprovementLesson])
+    def improvement_lessons(
+        _token: str | None = Depends(require_auth),
+    ) -> list[ImprovementLesson]:
+        return improvement_service.lessons()
 
     @app.get("/api/strategy-versions", response_model=list[StrategyVersion])
     def strategy_versions(_token: str | None = Depends(require_auth)) -> list[StrategyVersion]:
@@ -437,6 +467,16 @@ def create_app(
         _token: str | None = Depends(require_auth),
     ) -> StrategyVersion:
         return advanced_service.get_strategy_version(version_id)
+
+    @app.get(
+        "/api/strategy-versions/{version_id}/validation",
+        response_model=StrategyValidation,
+    )
+    def strategy_version_validation(
+        version_id: str,
+        _token: str | None = Depends(require_auth),
+    ) -> StrategyValidation:
+        return improvement_service.validation(version_id)
 
     @app.get("/api/champion", response_model=ChampionState)
     def champion(_token: str | None = Depends(require_auth)) -> ChampionState:
@@ -456,6 +496,10 @@ def create_app(
     @app.post("/api/champion/rollback", response_model=StrategyVersion)
     def rollback_champion(_token: str | None = Depends(require_auth)) -> StrategyVersion:
         return advanced_service.rollback_champion()
+
+    @app.get("/api/champion/rollout", response_model=ChampionRollout)
+    def champion_rollout(_token: str | None = Depends(require_auth)) -> ChampionRollout:
+        return improvement_service.rollout()
 
     @app.get("/api/health", response_model=HealthResponse)
     def health() -> HealthResponse:

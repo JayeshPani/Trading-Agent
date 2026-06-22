@@ -286,6 +286,68 @@ export interface ImprovementRun {
   createdAt: string;
 }
 
+export interface ImprovementStatus {
+  enabled: boolean;
+  health: "disabled" | "idle" | "running" | "healthy" | "failed";
+  scheduledTimeIst: string;
+  autoPromotionEnabled: boolean;
+  lastReviewDay?: string | null;
+  lastRunAt?: string | null;
+  latestError?: string | null;
+  activeLessons: number;
+  challengers: number;
+  rollout: ChampionRollout;
+  message: string;
+}
+
+export interface DailyImprovementReview {
+  id: string;
+  tradingDay: string;
+  status: "completed" | "failed" | "insufficient_data";
+  summary: string;
+  successes: string[];
+  mistakes: string[];
+  entryTimingNotes: string[];
+  exitTimingNotes: string[];
+  evidenceCounts: Record<string, number>;
+  createdVersionId?: string | null;
+  error?: string | null;
+  createdAt: string;
+}
+
+export interface ImprovementLesson {
+  id: string;
+  reviewId: string;
+  text: string;
+  evidenceCount: number;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface StrategyValidation {
+  versionId: string;
+  backtestPassed: boolean;
+  backtestReason: string;
+  shadowDays: number;
+  shadowTrades: number;
+  shadowProfitFactor: number;
+  shadowDailyLossBreached: boolean;
+  errorsClear: boolean;
+  championComparisonPassed: boolean;
+  eligibleForPromotion: boolean;
+  reason: string;
+}
+
+export interface ChampionRollout {
+  championVersionId?: string | null;
+  stagePercent: number;
+  liveDays: number;
+  liveTrades: number;
+  liveProfitFactor: number;
+  rollbackReason?: string | null;
+  updatedAt: string;
+}
+
 export interface StrategyVersion {
   id: string;
   strategy: string;

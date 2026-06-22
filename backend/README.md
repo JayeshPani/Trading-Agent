@@ -124,9 +124,14 @@ GET /api/live/autopilot/status
 GET /api/live/readiness
 POST /api/improvement/run-after-market
 GET /api/improvement/runs
+GET /api/improvement/status
+GET /api/improvement/reviews
+GET /api/improvement/lessons
 GET /api/strategy-versions
 GET /api/strategy-versions/{version_id}
+GET /api/strategy-versions/{version_id}/validation
 GET /api/champion
+GET /api/champion/rollout
 GET /api/challengers
 POST /api/challengers/{version_id}/promote
 POST /api/champion/rollback
@@ -169,7 +174,11 @@ If manual live readiness is true, the safe order flow is:
 4. `POST /api/live/orders/{order_id}/refresh`
 5. Use cancel or square-off only through the provided live order actions.
 
-Self-improvement is after-market only. Optional VectorBT, Optuna, MLflow, and Phoenix integrations are detected when installed and recorded in improvement runs; generated versions are stored as challengers and never mutate the active champion directly.
+Self-improvement is after-market only. Reviews use stored paper-trading evidence,
+feed bounded lessons into later Kimi decisions, and may create constrained JSON
+challengers. Generated Python is never executed. Challengers must pass backtest and
+isolated shadow-paper gates before promotion, then use staged 10/25/50/100 percent
+capital rollout with automatic rollback checks. Profit is not guaranteed.
 
 ## Production Safety Endpoints
 

@@ -145,10 +145,19 @@ class AdvancedTradingService:
         if not settings.is_stock_allowed(stock):
             raise HTTPException(status_code=400, detail=f"{stock} is outside the configured stock universe.")
         price = request.price or self._quote_price(runtime, stock)
-        quantity = request.quantity or max(int(float(state["capital_lock"]) // max(price, 1)), 1)
+        rollout = self.store.get_champion_rollout()
+        rollout_capital = settings.budget
+        if (
+            rollout.champion_version_id
+            and rollout.stage_percent > 0
+            and strategy == (self.store.current_champion().strategy if self.store.current_champion() else None)
+        ):
+            rollout_capital = settings.budget * rollout.stage_percent / 100
+        capital_limit = min(float(state["capital_lock"]), rollout_capital)
+        quantity = request.quantity or max(int(capital_limit // max(price, 1)), 1)
         if quantity <= 0 or price <= 0:
             raise HTTPException(status_code=400, detail="Live order quantity and price must be positive.")
-        if quantity * price > float(state["capital_lock"]):
+        if quantity * price > capital_limit:
             raise HTTPException(status_code=400, detail="Live order exceeds capital lock.")
 
         now = utc_iso()
@@ -425,12 +434,21 @@ class AdvancedTradingService:
         promoted = self.store.promote_strategy_version(version_id)
         if promoted is None:
             raise HTTPException(status_code=404, detail="Strategy version was not found.")
+        self.store.set_champion_rollout(
+            champion_version_id=promoted.id,
+            stage_percent=self.config.challenger_canary_percent,
+        )
         return promoted
 
     def rollback_champion(self) -> StrategyVersion:
         version = self.store.rollback_champion()
         if version is None:
             raise HTTPException(status_code=400, detail="No previous champion is available.")
+        self.store.set_champion_rollout(
+            champion_version_id=version.id,
+            stage_percent=self.config.challenger_canary_percent,
+            rollback_reason="Manual rollback.",
+        )
         return version
 
     def health(self) -> HealthResponse:
@@ -541,7 +559,8 @@ class AdvancedTradingService:
 
     def _assert_approved_strategy(self, strategy: str) -> None:
         approved = {template.name for template in APPROVED_STRATEGIES}
-        if strategy not in approved:
+        champion = self.store.current_champion()
+        if strategy not in approved and (champion is None or strategy != champion.strategy):
             raise HTTPException(status_code=400, detail="Strategy must be one of the approved templates.")
 
     def _quote_price(self, runtime: RuntimeState, stock: str) -> float:

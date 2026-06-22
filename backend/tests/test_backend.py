@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from backend.app.agent import (
     HermesClient,
@@ -19,12 +20,21 @@ from backend.app.agent import (
 from backend.app.breeze import BreezeClient, BreezeClientError, BreezeSession
 from backend.app.config import AppConfig
 from backend.app.main import create_app
+from backend.app.improvement import ImprovementProviderError, _decode_review_content
 from backend.app.rate_limit import RateLimiter, RateLimitError
 from backend.app.schemas import StrategyVersion
+from backend.app.schemas import (
+    AgentDecisionDraft,
+    ConstrainedStrategyRule,
+    DailyImprovementReview,
+    ImprovementReviewDraft,
+    StrategyRuleCondition,
+)
 from backend.app.store import SQLiteStore
 from backend.app.time_utils import (
     IST,
     build_intraday_market_clock,
+    current_trading_day,
     is_intraday_entry_cutoff_time,
     is_intraday_square_off_time,
     now_utc,
@@ -182,6 +192,8 @@ def make_client(
     scanner_max_symbols_per_cycle: int = 20,
     auto_paper_scan_interval_seconds: int = 0,
     auto_paper_monitor_interval_seconds: int = 0,
+    self_improvement_enabled: bool = False,
+    auto_challenger_promotion: bool = False,
 ):
     tempdir = tempfile.TemporaryDirectory()
     db_path = f"{tempdir.name}/test.db"
@@ -207,6 +219,10 @@ def make_client(
         scanner_max_symbols_per_cycle=scanner_max_symbols_per_cycle,
         auto_live_entries_enabled=auto_live_entries_enabled,
         auto_live_exits_enabled=auto_live_exits_enabled,
+        self_improvement_enabled=self_improvement_enabled,
+        self_improvement_time_ist="15:45",
+        auto_challenger_promotion=auto_challenger_promotion,
+        challenger_canary_percent=10,
     )
     store = SQLiteStore(db_path)
     fake_breeze = FakeBreezeClient()
@@ -289,6 +305,7 @@ class BackendApiTests(unittest.TestCase):
         self.addCleanup(store.close)
         self.addCleanup(tempdir.cleanup)
         headers = complete_setup(client)
+        client.app.state.fake_breeze.historical_candles["HDFCBANK"] = passing_candles()
         client.put(
             "/api/settings",
             json={
@@ -2041,14 +2058,64 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(start.status_code, 400)
         self.assertIn("paper-trading days", start.json()["detail"])
 
-    def test_improvement_creates_challenger_without_mutating_champion(self) -> None:
-        client, tempdir, store = make_client()
+    def test_improvement_creates_evidence_based_challenger_without_mutating_champion(self) -> None:
+        client, tempdir, store = make_client(
+            hermes_enabled=True,
+            hermes_api_key="KIMI_TEST_KEY",
+            self_improvement_enabled=True,
+        )
         self.addCleanup(store.close)
         self.addCleanup(tempdir.cleanup)
 
-        headers = register_user(client)
-        with patch("backend.app.advanced.is_market_open", return_value=False):
-            response = client.post("/api/improvement/run-after-market", headers=headers)
+        headers = complete_setup(client)
+        client.app.state.fake_breeze.historical_candles["HDFCBANK"] = passing_candles()
+        today = current_trading_day()
+        with store._lock, store._conn:
+            for index, pnl in enumerate((20, -5, 15)):
+                store._conn.execute(
+                    """
+                    INSERT INTO trades (
+                        id, stock, side, quantity, entry_price, stop_loss, target,
+                        live_pnl, status, mode, strategy, strategy_version,
+                        exit_price, pnl, exit_reason, opened_at, closed_at, paper
+                    )
+                    VALUES (?, 'HDFCBANK', 'BUY', 1, 100, 98.5, 103,
+                            ?, 'exited', 'intraday', 'EMA crossover', 'v1',
+                            ?, ?, 'Intraday square-off', ?, ?, 1)
+                    """,
+                    (
+                        f"review-trade-{index}",
+                        pnl,
+                        100 + pnl,
+                        pnl,
+                        f"{today}T09:30:00+00:00",
+                        f"{today}T10:00:00+00:00",
+                    ),
+                )
+        draft = ImprovementReviewDraft(
+            summary="EMA entries worked but late exits reduced gains.",
+            successes=["Positive EMA trades."],
+            mistakes=["Late exits reduced gains."],
+            lessons=["Prefer stronger volume confirmation before EMA entries."],
+            entryTimingNotes=["Avoid weak-volume entries."],
+            exitTimingNotes=["Review exits before forced square-off."],
+            challenger=ConstrainedStrategyRule(
+                name="EMA volume confirmation",
+                description="EMA trend with volume and moderate RSI.",
+                conditions=[
+                    StrategyRuleCondition(field="liquidity", operator="gt", value=0),
+                    StrategyRuleCondition(field="rsi", operator="between", minimum=0, maximum=100),
+                ],
+                stopLossPercent=1.5,
+                targetPercent=3,
+            ),
+        )
+        with patch("backend.app.improvement.is_market_open", return_value=False):
+            with patch(
+                "backend.app.improvement.SelfImprovementService._request_review",
+                return_value=draft,
+            ):
+                response = client.post("/api/improvement/run-after-market", headers=headers)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "created_challenger")
 
@@ -2058,6 +2125,219 @@ class BackendApiTests(unittest.TestCase):
         champion = client.get("/api/champion", headers=headers)
         self.assertIsNone(champion.json()["champion"])
         self.assertEqual(len(champion.json()["challengers"]), 1)
+        lessons = client.get("/api/improvement/lessons", headers=headers)
+        self.assertEqual(lessons.status_code, 200)
+        self.assertEqual(lessons.json()[0]["evidenceCount"], 1)
+        self.assertNotIn("KIMI_TEST_KEY", json.dumps(lessons.json()))
+
+    def test_improvement_failure_creates_no_challenger(self) -> None:
+        client, tempdir, store = make_client(
+            hermes_enabled=True,
+            hermes_api_key="KIMI_TEST_KEY",
+            self_improvement_enabled=True,
+        )
+        self.addCleanup(store.close)
+        self.addCleanup(tempdir.cleanup)
+        headers = complete_setup(client)
+        today = current_trading_day()
+        with store._lock, store._conn:
+            for index in range(3):
+                store._conn.execute(
+                    """
+                    INSERT INTO trades (
+                        id, stock, side, quantity, entry_price, stop_loss, target,
+                        live_pnl, status, mode, strategy, strategy_version,
+                        exit_price, pnl, exit_reason, opened_at, closed_at, paper
+                    )
+                    VALUES (?, 'HDFCBANK', 'BUY', 1, 100, 98.5, 103,
+                            1, 'exited', 'intraday', 'EMA crossover', 'v1',
+                            101, 1, 'Target hit', ?, ?, 1)
+                    """,
+                    (
+                        f"failed-review-{index}",
+                        f"{today}T09:30:00+00:00",
+                        f"{today}T10:00:00+00:00",
+                    ),
+                )
+        with patch("backend.app.improvement.is_market_open", return_value=False):
+            with patch(
+                "backend.app.improvement.SelfImprovementService._request_review",
+                side_effect=ImprovementProviderError("invalid Kimi response"),
+            ):
+                response = client.post("/api/improvement/run-after-market", headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "failed")
+        self.assertEqual(client.get("/api/strategy-versions", headers=headers).json(), [])
+
+    def test_improvement_runs_only_once_per_trading_day(self) -> None:
+        client, tempdir, store = make_client(
+            hermes_enabled=True,
+            hermes_api_key="KIMI_TEST_KEY",
+            self_improvement_enabled=True,
+        )
+        self.addCleanup(store.close)
+        self.addCleanup(tempdir.cleanup)
+        headers = complete_setup(client)
+        today = current_trading_day()
+        with store._lock, store._conn:
+            for index in range(3):
+                store._conn.execute(
+                    """
+                    INSERT INTO trades (
+                        id, stock, side, quantity, entry_price, stop_loss, target,
+                        live_pnl, status, mode, strategy, strategy_version,
+                        exit_price, pnl, exit_reason, opened_at, closed_at, paper
+                    )
+                    VALUES (?, 'HDFCBANK', 'BUY', 1, 100, 98.5, 103,
+                            1, 'exited', 'intraday', 'EMA crossover', 'v1',
+                            101, 1, 'Target hit', ?, ?, 1)
+                    """,
+                    (
+                        f"once-review-{index}",
+                        f"{today}T09:30:00+00:00",
+                        f"{today}T10:00:00+00:00",
+                    ),
+                )
+        draft = ImprovementReviewDraft(
+            summary="Review completed.",
+            lessons=["Require positive trend confirmation."],
+        )
+        service = client.app.state.improvement_service
+        with patch("backend.app.improvement.is_market_open", return_value=False):
+            with patch.object(service, "_request_review", return_value=draft) as request_mock:
+                first = service.run_daily_review(trading_day=today)
+                second = service.run_daily_review(trading_day=today)
+        self.assertEqual(first.status, "review_completed")
+        self.assertEqual(second.status, "already_completed")
+        self.assertEqual(request_mock.call_count, 1)
+
+    def test_improvement_reconciles_stale_state_from_latest_review(self) -> None:
+        client, tempdir, store = make_client(self_improvement_enabled=True)
+        self.addCleanup(store.close)
+        self.addCleanup(tempdir.cleanup)
+        today = current_trading_day()
+        store.save_improvement_review(
+            DailyImprovementReview(
+                id="failed-review",
+                tradingDay=today,
+                status="failed",
+                summary="Review failed safely.",
+                error="Invalid provider response.",
+                createdAt=utc_iso(),
+            )
+        )
+        store.update_improvement_state(
+            health="running",
+            last_review_day=today,
+            latest_error=None,
+        )
+
+        client.app.state.improvement_service._reconcile_state_from_latest_review()
+
+        state = store.get_improvement_state()
+        self.assertEqual(state["health"], "failed")
+        self.assertEqual(state["latest_error"], "Invalid provider response.")
+
+    def test_active_lessons_are_supplied_to_kimi_context(self) -> None:
+        client, tempdir, store = make_client(hermes_enabled=True)
+        self.addCleanup(store.close)
+        self.addCleanup(tempdir.cleanup)
+        headers = complete_setup(client)
+        store.replace_review_lessons(
+            "review-id",
+            ["Avoid EMA entries without volume confirmation."],
+        )
+        captured: dict[str, object] = {}
+
+        def decide(context):
+            captured.update(context)
+            return AgentDecisionDraft(
+                action="SKIP",
+                confidence=0.4,
+                reasons=["No clean setup."],
+                risks=["Signals are mixed."],
+            )
+
+        with patch("backend.app.agent.HermesClient.decide", side_effect=decide):
+            response = client.post("/api/agent/paper-cycle", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            captured["learnedLessons"][0]["text"],
+            "Avoid EMA entries without volume confirmation.",
+        )
+
+    def test_constrained_strategy_rejects_executable_fields(self) -> None:
+        with self.assertRaises(ValidationError):
+            ConstrainedStrategyRule.model_validate(
+                {
+                    "name": "Unsafe generated rule",
+                    "description": "Attempts to include executable content.",
+                    "conditions": [
+                        {"field": "trend", "operator": "gt", "value": 0},
+                        {"field": "rsi", "operator": "between", "minimum": 40, "maximum": 60},
+                    ],
+                    "stopLossPercent": 1,
+                    "targetPercent": 2,
+                    "code": "place_market_order()",
+                }
+            )
+
+    def test_improvement_parser_accepts_wrapped_aliases(self) -> None:
+        raw = _decode_review_content(
+            """
+            Review result:
+            ```json
+            {
+              "review": {
+                "summary": "Reviewed three trades.",
+                "successes": "Risk limits held.",
+                "mistakes": ["Late exit."],
+                "lessons": "Use volume confirmation.",
+                "entry_timing_notes": ["Avoid weak opens."],
+                "exit_timing_notes": [],
+                "newStrategy": null
+              }
+            }
+            ```
+            """
+        )
+        review = ImprovementReviewDraft.model_validate(raw)
+        self.assertEqual(review.successes, ["Risk limits held."])
+        self.assertEqual(review.lessons, ["Use volume confirmation."])
+
+    def test_challenger_requires_shadow_gate_before_auto_promotion(self) -> None:
+        client, tempdir, store = make_client(
+            self_improvement_enabled=True,
+            auto_challenger_promotion=True,
+        )
+        self.addCleanup(store.close)
+        self.addCleanup(tempdir.cleanup)
+        headers = register_user(client)
+        version = StrategyVersion(
+            id="shadow-candidate",
+            strategy="Adaptive: volume trend",
+            version="challenger-test",
+            parameters={},
+            backtestMetrics={
+                "profitFactor": 1.4,
+                "maxDrawdown": 5,
+                "winRate": 52,
+                "tradesCount": 120,
+            },
+            paperMetrics={},
+            riskNotes=["Test candidate"],
+            promotionStatus="backtested",
+            createdAt=utc_iso(),
+        )
+        store.save_strategy_version(version)
+        validation = client.get(
+            "/api/strategy-versions/shadow-candidate/validation",
+            headers=headers,
+        )
+        self.assertEqual(validation.status_code, 200)
+        self.assertFalse(validation.json()["eligibleForPromotion"])
+        client.app.state.improvement_service.evaluate_and_promote("shadow-candidate")
+        self.assertIsNone(store.current_champion())
 
     def test_champion_promotion_and_rollback_require_better_challenger(self) -> None:
         client, tempdir, store = make_client()

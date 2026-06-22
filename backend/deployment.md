@@ -27,6 +27,10 @@ AUTO_PAPER_MONITOR_INTERVAL_SECONDS=30
 SCANNER_MAX_SYMBOLS_PER_CYCLE=20
 AUTO_LIVE_EXITS_ENABLED=false
 AUTO_LIVE_ENTRIES_ENABLED=false
+SELF_IMPROVEMENT_ENABLED=true
+SELF_IMPROVEMENT_TIME_IST=15:45
+AUTO_CHALLENGER_PROMOTION=true
+CHALLENGER_CANARY_PERCENT=10
 ```
 
 Set `TRADING_MODE=live` and `STATIC_IP_READY=true` only after the VPS IP is registered and verified. Live orders are still blocked until the daily session, saved credentials, strategy eligibility, and safety gates pass.
